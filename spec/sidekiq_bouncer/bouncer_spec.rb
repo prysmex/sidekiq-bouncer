@@ -120,8 +120,8 @@ describe SidekiqBouncer::Bouncer do
         expect(redis_client).not_to have_received(:call)
       end
 
-      it 'returns true' do
-        expect(bouncer.let_in?(nil)).to be(true)
+      it 'returns a timestamp' do
+        expect(bouncer.let_in?(nil)).to be_a(Integer)
       end
     end
 
@@ -141,8 +141,8 @@ describe SidekiqBouncer::Bouncer do
           allow(redis_client).to receive(:call).with('GET', anything).and_return(now - 10)
         end
 
-        it 'returns true' do
-          expect(bouncer.let_in?(key)).to be(true)
+        it 'returns a timestamp' do
+          expect(bouncer.let_in?(key)).to be_a(Integer)
         end
       end
 
@@ -171,7 +171,7 @@ describe SidekiqBouncer::Bouncer do
   describe '#run' do
     before do
       # stubbing
-      allow(bouncer).to receive(:let_in?).with('do').and_return(true)
+      allow(bouncer).to receive(:let_in?).with('do').and_return(1)
       allow(bouncer).to receive(:let_in?).with('do_not').and_return(false)
     end
 
@@ -193,7 +193,7 @@ describe SidekiqBouncer::Bouncer do
       end
     end
 
-    context 'when let_in? returns true' do
+    context 'when let_in? returns 1' do
       it 'returns yield return' do
         expect(bouncer.run('do') { '__test__' }).to be('__test__')
       end

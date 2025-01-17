@@ -3,15 +3,16 @@
 module SidekiqBouncer
   class Bouncer
 
-    DELAY_BUFFER = 1          # Seconds
     DELAY = 60                # Seconds
+    DELAY_BUFFER = 1          # Seconds
 
     attr_reader :klass
     attr_accessor :delay, :delay_buffer
 
     # @param [Class] klass worker class that responds to `perform_at`
     # @param [Integer] delay seconds used for debouncer
-    # @param [Integer] delay_buffer used to prevent race conditions
+    # @param [Integer] delay_buffer used to prevent a race condition that may cause a job not the be executed,
+    #                  for example, if for some reason sidekiq executes the job 1 second before
     def initialize(klass, delay: DELAY, delay_buffer: DELAY_BUFFER)
       # unless klass.is_a?(Class) && klass.respond_to?(:perform_at)
       #   raise TypeError.new("first argument must be a class and respond to 'perform_at'")
@@ -22,15 +23,13 @@ module SidekiqBouncer
       @delay_buffer = delay_buffer
     end
 
-    # Schedules a job to be executed with a specified delay + the delay_buffer, and
-    # sets a key to Redis which will be used to debounce jobs
+    # Sets the debounce key to Redis with the timestamp and schedules a job to be executed at delay + the delay_buffer,
+    # adding the debounce key as the last argument so that later it can be used on execution to fetch the value on redis
     #
     # @param [*] params
     # @param [Array<Integer>|#to_s] key_or_args_indices
-    # @return [Boolean] true if should be excecuted
+    # @return [TODO]
     def debounce(*params, key_or_args_indices:)
-      raise TypeError.new('key_or_args_indices cannot be nil') if key_or_args_indices.nil?
-
       key = case key_or_args_indices
       when Array
         params.values_at(*key_or_args_indices).join(',')
@@ -38,27 +37,24 @@ module SidekiqBouncer
         key_or_args_indices
       end
 
+      raise TypeError.new("key must be a string, got #{key.inspect}") unless key.is_a?(String)
+
       key = redis_key(key)
+      at = now_i + @delay
 
       # Add/Update the timestamp in redis with debounce delay added.
-      redis.call('SET', key, now_i + @delay)
+      redis.call('SET', key, at)
 
-      # Schedule the job with not only debounce delay added, but also DELAY_BUFFER.
-      # DELAY_BUFFER helps prevent race condition between this line and the one above.
-      @klass.perform_at(
-        now_i + @delay + @delay_buffer,
-        *params,
-        key
-      )
+      # Schedule the job, adding the key as the last argument.
+      @klass.perform_at(at + @delay_buffer, *params, key)
     end
 
     # Checks if job should be excecuted
     #
-    # @param [NilClass|String] key
-    # @return [False|*] true if should be excecuted
+    # @param [NilClass|String] key, which was appeded by +debounce+
+    # @return [False|*] false when not executed
     def run(key)
-      timestamp = nil
-      return false unless let_in?(key) { |t| timestamp = t }
+      return false unless (timestamp = let_in?(key))
 
       redis.call('DEL', key) unless key.nil?
       yield
@@ -68,22 +64,21 @@ module SidekiqBouncer
     end
 
     # @param [NilClass|String] key
-    # @return [Boolean] true if should be excecuted
+    # @return [False|Integer] Integer if should be excecuted, 1 is returned when key is nil
     def let_in?(key)
       # handle non-debounced jobs and already scheduled jobs when debouncer is added for the first time
-      return true if key.nil?
+      return 1 if key.nil?
 
-      # Only the last job should come after the timestamp.
-      # Due to the DELAY_BUFFER, there could be mulitple jobs enqueued within
-      # the span of DELAY_BUFFER. The first one will clear the timestamp, and the rest
-      # will skip when they see that the timestamp is gone.
+      # Get the current value of the timestamp, set by the latest scheduled job.
       timestamp = redis.call('GET', key)
+
+      # Another job already ran (or is running) and removed the key. TODO: this can cause
+      # race conditions on jobs that are scheduled at nearly the same time since it takes time
+      # to delete the key.
       return false if timestamp.nil?
+      return false if now_i < timestamp.to_i # A newer job updated the key to run in the future
 
-      yield timestamp if block_given?
-      return false if now_i < timestamp.to_i
-
-      true
+      timestamp
     end
 
     private
@@ -93,9 +88,9 @@ module SidekiqBouncer
       SidekiqBouncer.config.redis_client
     end
 
-    # Builds a key based on arguments
+    # Appends the job class to the key to prevent clashes
     #
-    # @param [Array] redis_params
+    # @param [String] key
     # @return [String]
     def redis_key(key)
       "#{@klass}:#{key}"
