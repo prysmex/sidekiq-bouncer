@@ -19,6 +19,7 @@ describe SidekiqBouncer::Bouncer do
   let(:redis_client) { SidekiqBouncer.config.redis_client }
   let(:worker_klass) { WorkerMock }
   let(:now) { Time.now.to_i }
+  let(:id) { 'foo' }
 
   before do
     SidekiqBouncer.configure do |config|
@@ -39,7 +40,7 @@ describe SidekiqBouncer::Bouncer do
     it { expect(bouncer).to respond_to(:delay_buffer) }
     it { expect(bouncer).to respond_to(:delay_buffer=) }
     it { expect(bouncer).to respond_to(:debounce) }
-    it { expect(bouncer).to respond_to(:let_in?) }
+    it { expect(bouncer).to respond_to(:run) }
   end
 
   describe '.new' do
@@ -75,139 +76,105 @@ describe SidekiqBouncer::Bouncer do
   end
 
   describe '#debounce' do
-    it 'sets scoped_key to Redis with delayed timestamp' do
-      bouncer.debounce('test_param_1', 'test_param_2', key_or_args_indices: [0, 1])
+    it 'sets redis_key to Redis with id' do
+      bouncer.debounce('test_param_1', 'test_param_2', key_or_args_indices: [0, 1], id:)
 
       expect(redis_client)
         .to have_received(:call)
-        .with('SET', 'WorkerMock:test_param_1,test_param_2', now + bouncer.delay)
+        .with('SET', 'WorkerMock:test_param_1,test_param_2', id)
     end
 
-    it 'Calls perform_at with delay and delay_buffer, passes parameters and scoped_key' do
-      bouncer.debounce('test_param_1', 'test_param_2', key_or_args_indices: [0, 1])
+    it 'Calls perform_at with delay and delay_buffer, passes parameters and redis_key' do
+      bouncer.debounce('test_param_1', 'test_param_2', key_or_args_indices: [0, 1], id:)
       expect(worker_klass).to have_received(:perform_at).with(
         now + bouncer.delay + bouncer.delay_buffer,
         'test_param_1',
         'test_param_2',
-        'WorkerMock:test_param_1,test_param_2'
+        {'id' => id, 'key' => 'WorkerMock:test_param_1,test_param_2'}
       )
     end
 
     context 'with filtered parameters by key_or_args_indices' do
-      it 'sets scoped_key to Redis with delayed timestamp' do
-        bouncer.debounce('test_param_1', 'test_param_2', key_or_args_indices: [0])
+      it 'sets redis_key to Redis with id' do
+        bouncer.debounce('test_param_1', 'test_param_2', key_or_args_indices: [0], id:)
 
         expect(redis_client)
           .to have_received(:call)
-          .with('SET', 'WorkerMock:test_param_1', now + bouncer.delay)
+          .with('SET', 'WorkerMock:test_param_1', id)
       end
 
-      it 'Calls perform_at with delay and delay_buffer, passes parameters and scoped_key' do
-        bouncer.debounce('test_param_1', 'test_param_2', key_or_args_indices: [0])
+      it 'Calls perform_at with delay and delay_buffer, passes parameters and redis_key' do
+        bouncer.debounce('test_param_1', 'test_param_2', key_or_args_indices: [0], id:)
         expect(worker_klass).to have_received(:perform_at).with(
           now + bouncer.delay + bouncer.delay_buffer,
           'test_param_1',
           'test_param_2',
-          'WorkerMock:test_param_1'
+          {'id' => id, 'key' => 'WorkerMock:test_param_1'}
         )
       end
     end
   end
 
-  describe '#let_in?' do
-    context 'when key is nil' do
-      it 'does not call Redis' do
-        expect(redis_client).not_to have_received(:call)
-      end
+  describe '#run' do
+    let(:key) { 'WorkerMock:test_param_1,test_param_2' }
 
-      it 'returns a timestamp' do
-        expect(bouncer.let_in?(nil)).to be_a(Integer)
+    context 'when id does not match' do
+      before do
+        allow(redis_client).to receive(:call).with('GET', anything).and_return('_no_match_')
       end
-    end
-
-    context 'when key is not nil' do
-      let(:key) { 'WorkerMock:test_param_1,test_param_2' }
 
       it 'exec call on Redis with GET' do
-        bouncer.let_in?(key)
+        bouncer.run(key:, id:)
 
         expect(redis_client)
           .to have_received(:call)
           .with('GET', key)
       end
 
-      context 'when timestamp is in the past' do
-        before do
-          allow(redis_client).to receive(:call).with('GET', anything).and_return(now - 10)
-        end
-
-        it 'returns a timestamp' do
-          expect(bouncer.let_in?(key)).to be_a(Integer)
-        end
-      end
-
-      context 'when timestamp is in the future' do
-        before do
-          allow(redis_client).to receive(:call).with('GET', anything).and_return(Time.now + 10)
-        end
-
-        it 'returns false' do
-          expect(bouncer.let_in?(key)).to be(false)
-        end
-      end
-
-      context 'when debounce timestamp is nil' do
-        before do
-          allow(redis_client).to receive(:call).with('GET', anything).and_return(nil)
-        end
-
-        it 'returns false' do
-          expect(bouncer.let_in?(key)).to be(false)
-        end
-      end
-    end
-  end
-
-  describe '#run' do
-    before do
-      # stubbing
-      allow(bouncer).to receive(:let_in?).with('do').and_return(1)
-      allow(bouncer).to receive(:let_in?).with('do_not').and_return(false)
-    end
-
-    context 'when let_in? returns false' do
-      it 'returns false' do
-        expect(bouncer.run('do_not')).to be(false)
-      end
-
-      it 'does not yield' do
-        expect { |b| bouncer.run('do_not', &b) }.not_to yield_control
-      end
-
       it 'does not exec call on Redis with DEL' do
-        bouncer.run('do_not') { '__test__' }
+        bouncer.run(key:, id:)
 
         expect(redis_client)
           .not_to have_received(:call)
-          .with('DEL', anything)
+          .with('DEL', key)
+      end
+
+      it 'does not yield' do
+        expect { |b| bouncer.run(key:, id:, &b) }.not_to yield_control
+      end
+
+      it 'returns false' do
+        expect(bouncer.run(key:, id:)).to be(false)
       end
     end
 
-    context 'when let_in? returns 1' do
-      it 'returns yield return' do
-        expect(bouncer.run('do') { '__test__' }).to be('__test__')
+    context 'when id matches' do
+      before do
+        allow(redis_client).to receive(:call).with('GET', anything).and_return(id)
       end
 
-      it 'yields' do
-        expect { |b| bouncer.run('do', &b) }.to yield_control
-      end
-
-      it 'exec call on Redis with DEL' do
-        bouncer.run('do') { '__test__' }
+      it 'exec call on Redis with GET' do
+        bouncer.run(key:, id:)
 
         expect(redis_client)
           .to have_received(:call)
-          .with('DEL', 'do')
+          .with('GET', key)
+      end
+
+      it 'exec call on Redis with DEL' do
+        bouncer.run(key:, id:)
+
+        expect(redis_client)
+          .to have_received(:call)
+          .with('DEL', key)
+      end
+
+      it 'yields' do
+        expect { |b| bouncer.run(key:, id:, &b) }.to yield_control
+      end
+
+      it 'returns block return value' do
+        expect(bouncer.run(key:, id:) { '__test__' }).to be('__test__')
       end
     end
   end

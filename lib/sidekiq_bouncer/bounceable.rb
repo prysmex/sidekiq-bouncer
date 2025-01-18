@@ -19,8 +19,11 @@ module SidekiqBouncer
     end
 
     module InstanceMethods
-      def perform(*, debounce_key, **)
-        self.class.bouncer.run(debounce_key) do
+      def perform(*, debounce_data, **)
+        # handle non-debounced jobs and already scheduled jobs when debouncer is added for the first time
+        return super(*, debounce_data, **) unless debounce_data.is_a?(Hash) && debounce_data.key?('key')
+
+        self.class.bouncer.run(**debounce_data.symbolize_keys) do
           super(*, **)
         end
       end

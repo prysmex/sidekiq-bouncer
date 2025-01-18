@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require 'securerandom'
+
 module SidekiqBouncer
   class Bouncer
 
@@ -27,9 +29,10 @@ module SidekiqBouncer
     # adding the debounce key as the last argument so that later it can be used on execution to fetch the value on redis
     #
     # @param [*] params
+    # @param [String] id
     # @param [Array<Integer>|#to_s] key_or_args_indices
     # @return [TODO]
-    def debounce(*params, key_or_args_indices:)
+    def debounce(*params, key_or_args_indices:, id: SecureRandom.hex(3))
       key = case key_or_args_indices
       when Array
         params.values_at(*key_or_args_indices).join(',')
@@ -40,45 +43,28 @@ module SidekiqBouncer
       raise TypeError.new("key must be a string, got #{key.inspect}") unless key.is_a?(String)
 
       key = redis_key(key)
-      at = now_i + @delay
 
-      # Add/Update the timestamp in redis with debounce delay added.
-      redis.call('SET', key, at)
+      # Add/Update the id in redis with debounce delay added.
+      redis.call('SET', key, id)
 
       # Schedule the job, adding the key as the last argument.
-      @klass.perform_at(at + @delay_buffer, *params, key)
+      @klass.perform_at(now_i + @delay + @delay_buffer, *params, {'key' => key, 'id' => id})
     end
 
     # Checks if job should be excecuted
     #
-    # @param [NilClass|String] key, which was appeded by +debounce+
+    # @param [String] key
+    # @param [String] id
     # @return [False|*] false when not executed
-    def run(key)
-      return false unless (timestamp = let_in?(key))
+    def run(key:, id:)
+      redis_id = redis.call('GET', key)
+      return false if redis_id != id
 
-      redis.call('DEL', key) unless key.nil?
-      yield
+      redis.call('DEL', key)
+      yield if block_given? # execute the job
     rescue StandardError => e
-      redis.call('SET', key, timestamp) unless key.nil?
+      redis.call('SET', key, redis_id) if redis_id
       raise e
-    end
-
-    # @param [NilClass|String] key
-    # @return [False|Integer] Integer if should be excecuted, 1 is returned when key is nil
-    def let_in?(key)
-      # handle non-debounced jobs and already scheduled jobs when debouncer is added for the first time
-      return 1 if key.nil?
-
-      # Get the current value of the timestamp, set by the latest scheduled job.
-      timestamp = redis.call('GET', key)
-
-      # Another job already ran (or is running) and removed the key. TODO: this can cause
-      # race conditions on jobs that are scheduled at nearly the same time since it takes time
-      # to delete the key.
-      return false if timestamp.nil?
-      return false if now_i < timestamp.to_i # A newer job updated the key to run in the future
-
-      timestamp
     end
 
     private
