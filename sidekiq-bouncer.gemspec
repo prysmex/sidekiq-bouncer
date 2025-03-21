@@ -14,7 +14,7 @@ Gem::Specification.new do |spec|
   # spec.description   = 'Debounce Sidekiq jobs that have the same worker class and params.'
   # spec.homepage      = 'https://github.com/apartmentlist/sidekiq-bouncer'
   spec.license       = 'MIT'
-  spec.required_ruby_version = '>= 3.1.0'
+  spec.required_ruby_version = '>= 3.4.2'
 
   # spec.metadata['homepage_uri'] = spec.homepage
   # spec.metadata['source_code_uri'] = spec.homepage
